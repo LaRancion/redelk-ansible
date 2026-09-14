@@ -53,6 +53,28 @@ docker-compose -f $compose_file down
 docker-compose -f $compose_file up -d nginx
 echo
 
+# Wait for nginx to actually be ready to serve HTTP on port 80
+# (docker-compose up -d returns immediately, but nginx needs time to start,
+#  run envsubst on templates, and bind the port — especially on first deploy
+#  when images are still being pulled)
+echo "### Waiting for nginx to be ready..."
+nginx_ready=false
+for i in $(seq 1 60); do
+  if docker-compose -f $compose_file exec -T nginx nginx -t >/dev/null 2>&1 \
+     && curl -s -o /dev/null -w "%{http_code}" http://localhost:80/ 2>/dev/null | grep -qE "^(200|301|302|401|403)$"; then
+    echo "nginx is ready (attempt $i)"
+    nginx_ready=true
+    break
+  fi
+  echo "  nginx not ready yet, retrying in 3s (attempt $i/60)..."
+  sleep 3
+done
+
+if [ "$nginx_ready" = false ]; then
+  echo "[X] nginx did not become ready within 180s. Let's Encrypt challenge will likely fail." >&2
+fi
+echo
+
 echo "### Requesting Let's Encrypt certificate for $domain ..."
 
 # Select appropriate email arg
