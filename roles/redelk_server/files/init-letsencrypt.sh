@@ -41,7 +41,7 @@ fi
 echo "### Creating dummy certificate for $domain ..."
 path="/etc/letsencrypt/live/$domain"
 mkdir -p "$data_path/conf/live/$domain"
-docker-compose -f $compose_file run --rm --entrypoint "\
+docker-compose -f $compose_file run -T --rm --entrypoint "\
   openssl req -x509 -nodes -newkey rsa:$rsa_key_size -days 365\
     -keyout '$path/privkey.pem' \
     -out '$path/fullchain.pem' \
@@ -67,7 +67,7 @@ if [ $staging != "0" ]; then staging_arg="--staging"; fi
 echo "### Removing dummy certificate folder"
 rm -Rf "$data_path/conf/live/$domain"
 
-docker-compose -f $compose_file run --rm --entrypoint "\
+docker-compose -f $compose_file run -T --rm --entrypoint "\
   certbot certonly --webroot -w /var/www/certbot \
     $staging_arg \
     $email_arg \

@@ -208,6 +208,11 @@
     - external_domain != 'localhost'
     - not le_cert.stat.exists
   changed_when: true
+  # LE can legitimately fail (firewall/DNS not ready yet, rate limits); the
+  # self-signed fallback below guarantees nginx can still start, so don't
+  # fail the whole play here. A warning is emitted after the re-check.
+  failed_when: false
+  register: le_bootstrap
   tags:
     - pki
     - docker
@@ -220,13 +225,26 @@
   tags:
     - pki
 
+- name: Warn if Let's Encrypt certificate could not be obtained
+  ansible.builtin.debug:
+    msg: >-
+      Let's Encrypt bootstrap FAILED (rc={{ le_bootstrap.rc | default('skipped') }}).
+      Check port 80 is reachable from the internet for {{ external_domain }} and
+      that DNS resolves to this host ({{ le_bootstrap.stderr_lines | default([]) | select('search', 'Timeout|connection|failed') | list | first | default('see certbot output above') }}).
+      A self-signed fallback certificate was generated; replace it later by
+      deleting mounts/certbot/conf/live/ and re-running this playbook.
+  when:
+    - not le_cert_after.stat.exists or (le_bootstrap.rc is defined and le_bootstrap.rc != 0)
+  tags:
+    - pki
+
 # Fallback: self-signed dummy certificate so nginx can always start,
 # even if the Let's Encrypt bootstrap failed (e.g. DNS not ready, port 80 unreachable)
 - name: Generate fallback self-signed certificate if Let's Encrypt failed
   become: true
   ansible.builtin.command:
     cmd: >
-      docker-compose -f redelk-{{ redelk_install_type }}.yml run --rm --entrypoint
+      docker-compose -f redelk-{{ redelk_install_type }}.yml run -T --rm --entrypoint
       "openssl req -x509 -nodes -newkey rsa:4096 -days 365
       -keyout '/etc/letsencrypt/live/{{ external_domain }}/privkey.pem'
       -out '/etc/letsencrypt/live/{{ external_domain }}/fullchain.pem'
