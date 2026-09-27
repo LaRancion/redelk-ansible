@@ -53,25 +53,47 @@ docker-compose -f $compose_file down
 docker-compose -f $compose_file up -d nginx
 echo
 
-# Wait for nginx to actually be ready to serve HTTP on port 80
-# (docker-compose up -d returns immediately, but nginx needs time to start,
-#  run envsubst on templates, and bind the port — especially on first deploy
-#  when images are still being pulled)
+# Wait for nginx to actually be ready to serve HTTP on port 80.
+# docker-compose up -d returns immediately, but nginx needs time to start,
+# run envsubst on templates, and bind the port — especially on first deploy
+# when images are still being pulled.
 echo "### Waiting for nginx to be ready..."
 nginx_ready=false
 for i in $(seq 1 60); do
-  if docker-compose -f $compose_file exec -T nginx nginx -t >/dev/null 2>&1 \
-     && curl -s -o /dev/null -w "%{http_code}" http://localhost:80/ 2>/dev/null | grep -qE "^(200|301|302|401|403)$"; then
-    echo "nginx is ready (attempt $i)"
+  # Check if the container is running at all
+  container_state=$(docker-compose -f $compose_file ps nginx 2>/dev/null | grep -c 'Up')
+  if [ "$container_state" -eq 0 ]; then
+    echo "  [attempt $i/60] nginx container not running yet. Logs:"
+    docker-compose -f $compose_file logs --tail=5 nginx 2>&1 | sed 's/^/    /'
+    sleep 3
+    continue
+  fi
+
+  # Check if nginx config is valid
+  nginx -t 2>/dev/null
+  nginx_config_ok=$?
+  if [ "$nginx_config_ok" -ne 0 ]; then
+    echo "  [attempt $i/60] nginx config test failed:"
+    docker-compose -f $compose_file exec -T nginx nginx -t 2>&1 | sed 's/^/    /'
+    sleep 3
+    continue
+  fi
+
+  # Check if port 80 is actually serving
+  http_code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:80/ 2>/dev/null)
+  if echo "$http_code" | grep -qE "^(200|301|302|401|403)$"; then
+    echo "nginx is ready (attempt $i, HTTP $http_code)"
     nginx_ready=true
     break
   fi
-  echo "  nginx not ready yet, retrying in 3s (attempt $i/60)..."
+  echo "  [attempt $i/60] nginx running but port 80 not ready (HTTP code: ${http_code:-none})"
   sleep 3
 done
 
 if [ "$nginx_ready" = false ]; then
   echo "[X] nginx did not become ready within 180s. Let's Encrypt challenge will likely fail." >&2
+  echo "[X] Last 20 nginx log lines:"
+  docker-compose -f $compose_file logs --tail=20 nginx 2>&1 | sed 's/^/    /' >&2
 fi
 echo
 
@@ -97,7 +119,20 @@ docker-compose -f $compose_file run -T --rm --entrypoint "\
     --rsa-key-size $rsa_key_size \
     --agree-tos \
     --force-renewal -n" certbot
+CERTBOT_RC=$?
 echo
 
+if [ "$CERTBOT_RC" -ne 0 ]; then
+  echo "[X] certbot failed with exit code $CERTBOT_RC" >&2
+  echo "[X] Let's Encrypt challenge failed. Common causes:" >&2
+  echo "    - Port 80 not reachable from the internet (firewall/NSG)" >&2
+  echo "    - DNS not resolving $domain to this host" >&2
+  echo "    - Rate limit hit (try staging mode: le_staging: 1)" >&2
+  echo "    - nginx not serving /.well-known/acme-challenge/ correctly" >&2
+  # Recreate the directory so the fallback cert task can write to it
+  mkdir -p "$data_path/conf/live/$domain"
+  exit $CERTBOT_RC
+fi
+
 echo "### Reloading nginx ..."
-docker-compose -f $compose_file exec nginx nginx -s reload
+docker-compose -f $compose_file exec -T nginx nginx -s reload
